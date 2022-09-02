@@ -1,0 +1,1275 @@
+---
+title: "FEFA_Psykos"
+author: "Maria Lee"
+date: "12/18/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Emotion Recognition in First Episode Psychosis Patients
+
+###  Aim 
+
+This study aims to test two hypotheses.
+1. FEP performs significantly worse than HC on facial emotion recognition 
+2. The level of psychotic symptoms in FEP is associated to their performance on facial emotion recognition task. 
+
+```{r}
+knitr::opts_chunk$set(echo = FALSE)
+#Change to actual location 
+knitr::opts_knit$set(root.dir = "~/OneDrive - Karolinska Institutet/FEFA Psykos/Data")
+#Load libraries
+library(dplyr) #For data wrangling
+library(readxl) #To load excel-files
+library(ppcor) #For partial correlation analysis
+library(rstatix) #For statistical calculations
+library(ggplot2)
+library(broom)
+library(effectsize)
+library(modelbased)
+library(parameters)
+library(sandwich)
+library(tidyverse)
+library(rebus) #To work with stringr
+library(gmodels) #For chi square test
+library(forcats)
+library(cowplot)
+  
+
+#Load data
+fefa <- read_excel("/Users/marialee/OneDrive - Karolinska Institutet/FEFA Psykos/Data/Marias R/data/FEFA_R_Maria_tidy.xlsx")
+
+#Remove age outlier (not considered to be first episode psychosis)
+fefa <- dplyr::filter(fefa, ID != "CENP002")
+
+#Make Patient/Healthy control category a factor, to be able to use in analyses
+fefa$Pat_HC <- as.factor(fefa$Pat_HC)
+
+#Make Medication category a factor as well. 
+fefa$Medication <- as.factor(fefa$Medication)
+
+#Make new FEFA categories - for positive emotions and negative emotions
+fefa <- fefa %>% mutate(Negative = Disgust + Anger + Fear + Sadness) %>% mutate(Total = Surprise + Joy + Disgust + Anger + Fear + Sadness + Neutral)
+
+```
+
+
+
+
+## Analysis 1, group differences 
+#  Check assumptions first
+
+
+
+```{r}
+#CHECK ASSUMPTIONS FOR ANCOVA
+
+#Independent observations - YUP
+
+#Homogeneity of variances
+fefa %>% 
+  levene_test(Negative ~ Pat_HC, center = median)
+#Variance is significantly different for Negative FEFA
+fefa %>% 
+  levene_test(Joy ~ Pat_HC, center = median)
+#Variance is not significantly different for Joy
+fefa %>% 
+  levene_test(Total ~ Pat_HC, center = median)
+#Variances is not significantly different for Total FEFA, but just about p = 0.051
+
+#Normality of residuals, outliers, linear relationship, homoscedasticity 
+#Whole FEFA
+# Fit the model
+model_tot <- lm(Total ~ Pat_HC + Age + Gender , data = fefa)
+plot(model_tot, which = c(1, 3, 2, 4))
+#Plot 1 indicates homoscedasticity is okay
+#Plot 2 indicates we have an issue with normality of residuals
+#Plot 3 indicates homoscedasticity is okay
+#Plot 4 indicates we have no influential cases
+
+#We will still look closer at potential outliers, extracting standardized residuals
+# Inspect the model diagnostic metrics
+model.metrics0 <- augment(model_tot) %>%
+  select(-.hat, -.sigma, -.fitted) # Remove details
+head(model.metrics0, 3)
+
+#Storing values from the model to check assumptions
+fefa$standardized.resid <- rstandard(model_tot)
+fefa$cooks.distance <- cooks.distance(model_tot)
+fefa$leverage <- hatvalues(model_tot)
+fefa$covariance.ratios <- covratio(model_tot)
+#Make a category for large residuals
+fefa$large.residual <- fefa$standardized.resid >2 | fefa$standardized.resid < -2
+#Extract the cases that have large residuals, and look at other diagnostics
+fefa[fefa$large.residual, c("ID", "Total", "Joy", "Negative", "Age", "standardized.resid", "cooks.distance", "leverage", "covariance.ratios")]
+
+
+```
+
+We also examined all individuals +/- 3.3 standardized residuals from the mean. None had a Cook's distance close to 1, and none had an overly large leverage on the model (considered to be over 0.099 (3*(k+1/n))). 
+However, when examining the source file and the responses from one individual (the one with the largest standardized residual (-4.98)) it became apparent that the validity of this individual's performance was questionable. This individual alternated between only two responses (Neutral and Joy) and there was a note from a family member present at time of testing that "the individual seemed lethargic or apathetic". Based on this, the individual will be excluded from all analyses. 
+The other outliers/influential cases identified based on their standardized residuals will be included. 
+
+
+
+```{r}
+#Given the above results, individual XX is considered an outlier. 
+#Remove outlier
+fefa <- dplyr::filter(fefa, ID != "PNVP007")
+
+#Homogeneity of regression slopes (These were all okay, i. e. the interaction term was not significant)
+
+model_tot1 <- lm(Total ~ Pat_HC*Age + Pat_HC*Gender, data = fefa) 
+summary(model_tot1) #OK
+model_neg1 <- lm(Negative ~ Pat_HC*Age + Pat_HC*Gender, data = fefa)
+summary(model_neg1)
+model_pos1 <- lm(Joy ~ Pat_HC*Age + Pat_HC*Gender, data = fefa)
+summary(model_pos1)
+
+```
+
+After checking assumptions, we conclude that we have problems with normality of residuals and homogeneity of variances in some cases. 
+
+Therefore we should perform robust analysis with bootstrapping. 
+
+
+##  Confirmatory analysis - group differences
+
+
+```{r}
+#ANCOVA, for FEFA Total
+fefa_lm <- lm(Total ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model (this tests parameter estimates)
+fefa_rob <- robust::lmRob(formula = Total ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_rob)
+
+#To get a summary we using heteroscedascitcity consistent standard errors, we put the model into model_parameters() (this has more to do with p-values and confidence intervals)
+#parameters::model_parameters(fefa_lm, robust = TRUE, vcov.type="HC4", digits = 3) #notice that we use the original lm model here!!!
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+
+parameters::bootstrap_parameters(fefa_lm)
+
+#Now, if we would want to compare the means of the groups (adjusted for the covariates), so in our case, not look at the numerical raw means but look at the means of the patients and the controls, adjusted for age and gender, we can use a function called estimate_means, from the modelbased package. 
+
+modelbased::estimate_means(fefa_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+```
+
+The original ANCOVA model show that the effect of Pat_HC group is significant on FEFA Total scores, 
+p = 0.00001016.
+In that model, the effect of gender is also significant, p = 0.03916
+
+The robust model gives us the estimates. The estimate for Patient indicates that, when keeping age and gender constant, belonging to the patient group still means a that your score will be 2 points lower on average, than for someone from the control group. Multiple R-squared is 0.156, meaning our model explains 15,6 % of the variability in the data. 
+
+The bootstrap model gives us confidence intervals and significance tests without assuming normality and being robust to violations of homoscedasticty. According to the bootstrap model the effect of group is significant at the level of p < .001, with a 95% confidence interval between -3.75 and -1.62 for the difference between groups. The effect of gender is also still signficant, p = 0.036. 
+
+Adjusted means. 
+
+
+```{r}
+#ANCOVA, for Negative
+fefa_neg_lm <- lm(Negative ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_neg_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_neg_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_neg_rob <- robust::lmRob(formula = Negative ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_neg_rob)
+
+#To get a summary we using heteroscedascitcity consistent standard errors, we put the model into model_parameters()
+#parameters::model_parameters(fefa_neg_lm, robust = TRUE, vcov.type="HC4", digits = 3) #notice that we use the original lm model here!!!
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_neg_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_neg_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+```
+
+The original ANCOVA model show that the effect of Pat_HC group is significant on FEFA Negative scores, 
+p < 0.00000000000000022
+In that model, neither the effect of gender or age is significant.
+
+The robust model gives us the estimates. The estimate for Patient indicates that, when keeping age and gender constant, belonging to the patient group still means a that your score will be 1.74 points lower on average, than for someone from the control group. Multiple R-squared is 0.1466, meaning our model explains 14,6 % of the variability in the data.  
+
+The bootstrap model gives us confidence intervals and significance tests without assuming normality and being robust to violations of homoscedasticty. According to the bootstrap model the effect of group is significant at the level of p < .001, with a 95% confidence interval between -3.08 and -1.22 for the difference between groups. Neither the effect of gender or age is significant. 
+
+Adjusted means. 
+
+
+```{r}
+
+#Trying ANCOVA, for Joy
+fefa_joy_lm <- lm(Joy ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_joy_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_joy_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_joy_rob <- robust::lmRob(formula = Joy ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_joy_rob)
+
+#To get a summary we using heteroscedascitcity consistent standard errors, we put the model into model_parameters()
+#parameters::model_parameters(fefa_joy_lm, robust = TRUE, vcov.type="HC4", digits = 3) #notice that we use the original lm model here!!!
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_joy_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_joy_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+
+```
+
+The original ANCOVA model show that the effect of Pat_HC group is not significant, p = 0.26468. In that model, the effect of gender is significant, p = 0.04897.
+
+The robust model gives us the estimates. The estimate for Patient indicates that, when keeping age and gender constant, belonging to the patient group still means that your score will be 0.20 points lower on average, than for someone from the control group. However, this effect is NOT significant. Multiple R-squared is 0.02941, meaning our model explains 2,9 % of the variability in the data.  
+
+The bootstrap model gives us confidence intervals and significance tests without assuming normality and being robust to violations of homoscedasticty. According to the bootstrap model the effect of group is not significant (p = 0.273), with a 95% confidence interval between -0.58 and 0.16 for the difference between groups. The effect of gender is still signficant, p = 0.045. 
+
+Adjusted means. 
+
+
+##  Plots of group differences
+
+```{r, echo = FALSE}
+
+#Plot FEFA total
+viol_dot1 <- ggplot2::ggplot(fefa, aes(x = Pat_HC, y = Total, fill = Pat_HC), show.legend = FALSE) + 
+  geom_dotplot(binaxis = "y", binwidth = 0.55, stackdir = "center", show.legend = FALSE) +
+  geom_violin(show.legend = FALSE, alpha = 0.2) +
+  stat_summary(fun.data = "mean_cl_normal", show.legend = FALSE) + 
+  labs(x = "", y = "FEFA Total") +
+  coord_cartesian(ylim = c(0, 35)) +
+  scale_y_continuous(breaks = seq(0, 35, 5)) +
+  theme_minimal(base_family = "sans", base_size = 10)
+
+#Max is 34 points
+
+viol_dot2 <- ggplot2::ggplot(fefa, aes(x = Pat_HC, y = Negative, fill = Pat_HC, shape = Pat_HC), show.legend = FALSE) + 
+  geom_dotplot(binaxis = "y", binwidth = 0.35, stackdir = "center", show.legend = FALSE) +
+  geom_violin(show.legend = FALSE, alpha = 0.2) +
+  stat_summary(fun.data = "mean_cl_normal", show.legend = FALSE) + 
+  labs(x = "", y = "FEFA Negative") +
+  coord_cartesian(ylim = c(0, 20)) +
+  scale_y_continuous(breaks = seq(0, 20, 2)) +
+  theme_minimal(base_family = "sans", base_size = 10)
+
+#Max is 19 points
+
+viol_dot3 <- ggplot2::ggplot(fefa, aes(x = Pat_HC, y = Joy, fill = Pat_HC), show.legend = FALSE) + 
+  geom_dotplot(binaxis = "y", binwidth = 0.10, stackdir = "center", show.legend = FALSE) +
+  geom_violin(show.legend = FALSE, alpha = 0.2) +
+  stat_summary(fun.data = "mean_cl_boot", show.legend = FALSE) + 
+  labs(x = "", y = "FEFA Happiness") +
+  coord_cartesian(ylim = c(0, 8)) +
+  scale_y_continuous(breaks = seq(0, 8, 2)) +
+  theme_minimal(base_family = "sans", base_size = 10)
+
+#Max is 7 points
+
+#Put them all together
+viol_dotrow <- plot_grid(
+  viol_dot1 + theme(legend.position="none"),
+  viol_dot2 + theme(legend.position="none"),
+  viol_dot3 + theme(legend.position="none"),
+  align = 'vh',
+  axis = "b",
+  labels = c("A", "B", "C"),
+  hjust = -0.5,
+  nrow = 1
+)
+
+
+viol_dotrow
+
+```
+
+
+
+
+
+##  If significant difference between FEP and HC in positive emotions, what errors do they make?  
+
+```{r, include=FALSE, warning=FALSE, message=FALSE, results='hide'}
+#Load error data (containing mixed emotions category)
+fefa_error <- read_excel("/Users/marialee/OneDrive - Karolinska Institutet/FEFA Psykos/Data/Marias R/data/FEFA_error_analyses_R_Maria.xlsx")
+
+```
+
+
+
+##  Computing mixed emotion category
+
+
+```{r, echo = FALSE}
+#Computing and adding mixed emotion category
+#Remove last two columns (empty), and keep only faces
+fefa_error <- dplyr::select(fefa_error, 1:10) %>%
+  dplyr::filter(fefa_error$test_type == "faces")
+
+#Remove follow-up task
+fefa_error <- fefa_error %>%
+  dplyr::filter(str_detect(ID, pattern = START %R% negated_char_class("2")))
+
+#Add column for Patient/Healthy control status
+fefa_error <- fefa_error %>%
+  dplyr::mutate(Pat_HC = ID)
+
+#Change so that all ID names are the same length (7 characters)
+fefa_error$ID <- str_sub(fefa_error$ID, 1, 7) #Keep only the first 7 characters
+#Also change the ID names in the Pat_HC column
+fefa_error$Pat_HC <- str_sub(fefa_error$ID, 1, 7) #Keep only the first 7 characters
+
+#Assign all that have a fourth letter "P" as patients and everyone with fourth letter "K" as controls.
+fefa_error$Pat_HC <- str_replace_all(fefa_error$Pat_HC, pattern = START %R% ANY_CHAR %R% ANY_CHAR %R% ANY_CHAR %R% "P" %R% ANY_CHAR %R% ANY_CHAR %R% ANY_CHAR %R% END, "Patient")
+
+fefa_error$Pat_HC <- str_replace_all(fefa_error$Pat_HC, pattern = START %R% ANY_CHAR %R% ANY_CHAR %R% ANY_CHAR %R% "K" %R% ANY_CHAR %R% ANY_CHAR %R% ANY_CHAR %R% END, "Control")
+
+#Add column for Pure/Mixed emotion
+fefa_error <- fefa_error %>%
+  dplyr::mutate(Pure_Mixed = Emotion_Correct)
+
+#Assign mixed to every row that conforms to "Joy,Neutral" and so on. 
+#Create patterns
+pure <- START %R% or("Joy", "Sadness", "Disgust", "Anger", "Surprise", "Neutral", "Fear") %R% END
+mixed <- START %R% or("Joy,Neutral", "Disgust ,Anger", "Fear,Sadness", "Fear,Surprise", "Joy,Surprise", "Neutral ,Anger", "Neutral ,Sadness", "Disgust ,Sadness", "Fear,Anger", "Fear,Neutral")
+#Assign pure to pure emotions, mixed to mixed. 
+fefa_error$Pure_Mixed <- str_replace_all(fefa_error$Pure_Mixed, pattern = pure, "Pure")
+fefa_error$Pure_Mixed <- str_replace_all(fefa_error$Pure_Mixed, pattern = mixed, "Mixed")
+
+#Change value in Correct column, to be able to add up the number of correct responses
+fefa_error$Correct <- str_replace_all(fefa_error$Correct, pattern = "True", "1")
+fefa_error$Correct <- str_replace_all(fefa_error$Correct, pattern = "False", "0")
+fefa_error$Correct <- as.numeric(fefa_error$Correct)
+
+#Remove the age outlier and the analysis outlier
+fefa_error <- dplyr::filter(fefa_error, ID != "CENP002")
+fefa_error <- dplyr::filter(fefa_error, ID != "PNVP007")
+
+#For confirmatory analysis, remove Mixed emotions. 
+fefa_err_sum <- dplyr::filter(fefa_error, Pure_Mixed == "Pure")
+```
+
+
+## Error analysis
+
+
+```{r, echo = FALSE}
+#ERROR ANALYSIS
+
+#Remove correct responses (Using "Correct" column)
+fefa_err_sum <- dplyr::filter(fefa_err_sum, Correct == 0)
+#Look at number of NA's, when people did not provide an answer in time
+no_emotion <- is.na(fefa_err_sum$Emotion_Selected)
+sum(no_emotion)
+#20 NA
+
+fefa_err_sum_p <- dplyr::filter(fefa_err_sum, Pat_HC == "Patient")
+fefa_err_sum_hc <- dplyr::filter(fefa_err_sum, Pat_HC == "Control")
+
+#For patients
+error_choice <- table(fefa_err_sum_p$Emotion_Correct, fefa_err_sum_p$Emotion_Selected, exclude = NULL)
+error_choice <- as.data.frame(error_choice)
+#Rename variables
+error_choice <- dplyr::rename(error_choice, Correct_emo = Var1)
+error_choice <- dplyr::rename(error_choice, Mistaken_for_emo = Var2)
+
+#Sum up the errors and look at the proportions of the different emotions
+error_choice <- error_choice %>% 
+ dplyr::group_by(Correct_emo) %>%
+ dplyr::mutate(percent = Freq/sum(Freq))
+
+#For healthy controls
+error_choiceHC <- table(fefa_err_sum_hc$Emotion_Correct, fefa_err_sum_hc$Emotion_Selected, exclude = NULL)
+error_choiceHC <- as.data.frame(error_choiceHC)
+#Rename variables
+error_choiceHC <- dplyr::rename(error_choiceHC, Correct_emo = Var1)
+error_choiceHC <- dplyr::rename(error_choiceHC, Mistaken_for_emo = Var2)
+
+#Present table
+error_choiceHC <- error_choiceHC %>% 
+ dplyr::group_by(Correct_emo) %>%
+ dplyr::mutate(percent = Freq/sum(Freq))
+
+#Check amount of times different emotions were presented, for patients and
+#controls separately. 
+check <- fefa_error %>% 
+  dplyr::group_by(Pat_HC, Emotion_Correct) %>%
+  dplyr::summarise(
+    frequency = n()
+  )
+#Then, check the amount of times answers were incorrect for different emotions
+check2 <- fefa_error %>%
+  dplyr::filter(Correct == 0) %>%
+  dplyr::group_by(Pat_HC, Emotion_Correct) %>%
+  dplyr::summarise(
+    frequency = n()
+  )
+
+#Adding mixed variable
+
+fefa_mixed <- dplyr::select(fefa_error, ID, Correct, Pat_HC, Pure_Mixed)
+fefa_mixed <- dplyr::filter(fefa_mixed, Pure_Mixed == "Mixed")
+
+#Now, go from long to short form
+fefa_mixed <- pivot_wider(fefa_mixed,
+    id_cols = ID,
+    names_from = Pure_Mixed,
+    values_from = Correct,
+    values_fn = sum)
+
+#Double check that the individuals in the file are the same as in the main FEFA analysis.
+#Merge fefa_mixed with normal fefa data.frame, to add Mixed column
+fefa <- dplyr::inner_join(fefa, fefa_mixed, by = "ID")
+
+#Add education level
+edu <- read_excel("/Users/marialee/OneDrive - Karolinska Institutet/FEFA Psykos/Data/Marias R/data/tidy_cognition_edu.xlsx")
+#Keep columns 1, 7-9
+edu <- dplyr::select(edu, c(1, 7:9))
+#Merge edu with normal fefa data.frame, to add Education
+fefa <- dplyr::inner_join(fefa, edu, by = c("ID" = "KASP_id"))
+
+```
+
+
+
+
+
+##  Meff correction
+
+
+```{r}
+
+#Check the correlations between the FEFA emotion categories (Positive, Negative and Neutral), to use in the adjustment of alpha-level (Hypothesis 1). 
+
+cor(fefa$Joy, fefa$Negative)
+#0.06772403
+cor(fefa$Joy, fefa$Total)
+#0.3472898
+cor(fefa$Negative, fefa$Total)
+#0.9383806
+
+#Computing the number of effective tests among all dependent variables in confirmatory analyses section (Hypothesis 1), mEff, as described in Derringer, 2018, using the meff-function. 
+
+#Downloading meff function
+source('https://osf.io/ws6xc/download')
+#Set alpha level
+alpha <- 0.05
+meff_fefa <- meff(fefa[, c("Joy", "Negative", "Total")])
+#Calculating new p-value for hypothesis testing section. 
+p_value <- alpha/meff_fefa
+p_value
+#Corrected per-test alpha level: 0.02146386
+
+#Computing the number of effective tests among all dependent variables in confirmatory analyses section (Hypothesis 2), mEff, as described in Derringer, 2018, using the meff-function. 
+
+#Split data into two groups, depending on FEP/HC
+fefa_fep <- dplyr::filter(fefa, Pat_HC == "Patient")
+fefa_hc <- dplyr::filter(fefa, Pat_HC == "Control")
+
+cor(fefa_fep$Joy, fefa_fep$Negative)
+#0.03635063
+cor(fefa_fep$Joy, fefa_fep$Total)
+#0.3034617
+cor(fefa_fep$Negative, fefa_fep$Total)
+#0.9378619
+cor(fefa_fep$PANSS_Neg, fefa_fep$PANSS_Pos)
+#0.246282
+
+meff_fefa_fep2 <- meff(fefa[, c("Joy", "Negative", "Total")])  
+meff_fefa_panss2 <- meff(fefa[, c("PANSS_Neg", "PANSS_Pos")])
+
+p_value_fep2 <- alpha/(meff_fefa_fep2*meff_fefa_panss2)
+p_value_fep2
+#Corrected per-test alpha level: 0.01106758
+
+
+```
+
+
+
+The new significance threshold for Hypothesis 1 (group comparison) is: 0.02146386
+
+The new significance threshold for Hypothesis 2 (correlation analyses) is: 0.01106758
+
+
+
+
+##  Analysis 2, Correlations between psychotic symptoms and scores on facial emotion recognition in FEP. 
+
+
+```{r}
+
+#Assumptions partial correlation
+#Normally distributed data, which we do not have. So we will use Kendall's Tau partial correlation. 
+
+#exam_tib %>% 
+#  dplyr::select(exam_grade, revise) %>% 
+#  correlation::correlation()
+
+#Perform partial correlation
+#pcor.test(fefa_fep$Total,fefa_fep$PANSS_Neg, fefa_fep[,c("Age","Gender")], method = c("kendall"))
+
+#PANSS Negative
+pcor.test(fefa_fep$Negative,fefa_fep$PANSS_Neg, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Total,fefa_fep$PANSS_Neg, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Joy,fefa_fep$PANSS_Neg, fefa_fep[,c("Age")], method = c("kendall"))
+
+#PANSS Positive
+pcor.test(fefa_fep$Negative,fefa_fep$PANSS_Pos, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Total,fefa_fep$PANSS_Pos, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Joy,fefa_fep$PANSS_Pos, fefa_fep[,c("Age")], method = c("kendall"))
+
+```
+
+No correlations were significant. 
+
+
+
+```{r}
+#Robustness check, using other correlation methods
+
+pcor.test(fefa_fep$PANSS_Neg, fefa_fep$Total, fefa_fep[,c("Age")], method = c("pearson"))
+pcor.test(fefa_fep$PANSS_Neg, fefa_fep$Total, fefa_fep[,c("Age")], method = c("spearman"))
+
+pcor.test(fefa_fep$PANSS_Neg, fefa_fep$Negative, fefa_fep[,c("Age")], method = c("pearson"))
+pcor.test(fefa_fep$PANSS_Neg, fefa_fep$Negative, fefa_fep[,c("Age")], method = c("spearman"))
+
+pcor.test(fefa_fep$PANSS_Neg, fefa_fep$Joy, fefa_fep[,c("Age")], method = c("pearson"))
+pcor.test(fefa_fep$PANSS_Neg, fefa_fep$Joy, fefa_fep[,c("Age")], method = c("spearman"))
+
+pcor.test(fefa_fep$PANSS_Pos, fefa_fep$Total, fefa_fep[,c("Age")], method = c("pearson"))
+pcor.test(fefa_fep$PANSS_Pos, fefa_fep$Total, fefa_fep[,c("Age")], method = c("spearman"))
+
+pcor.test(fefa_fep$PANSS_Pos, fefa_fep$Negative, fefa_fep[,c("Age")], method = c("pearson"))
+pcor.test(fefa_fep$PANSS_Pos, fefa_fep$Negative, fefa_fep[,c("Age")], method = c("spearman"))
+
+pcor.test(fefa_fep$PANSS_Pos, fefa_fep$Joy, fefa_fep[,c("Age")], method = c("pearson"))
+pcor.test(fefa_fep$PANSS_Pos, fefa_fep$Joy, fefa_fep[,c("Age")], method = c("spearman"))
+
+```
+
+
+Regardless of correlation method used, there is no significant linear relationship between FEFA and PANSS in our data. 
+
+
+#  Plotting the relationship between PANSS and FEFA
+
+```{r}
+plot(fefa_fep$Total, fefa_fep$PANSS_Neg)
+plot(fefa_fep$Total, fefa_fep$PANSS_Pos)
+
+```
+
+
+##  Exploratory analysis - group differences FEP and HC on all emotions.
+
+#  Surprise
+
+```{r}
+
+#Trying ANCOVA, for Surprise
+fefa_surprise_lm <- lm(Surprise ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_surprise_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_surprise_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_surprise_rob <- robust::lmRob(formula = Surprise ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_surprise_rob)
+
+#To get a summary we using heteroscedascitcity consistent standard errors, we put the model into model_parameters()
+#parameters::model_parameters(fefa_joy_lm, robust = TRUE, vcov.type="HC4", digits = 3) #notice that we use the original lm model here!!!
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_surprise_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_surprise_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+
+
+
+
+```
+
+estimate: -0.0000000000000001357. (on average, patients have slightly lower values on Surprise)
+p-value 0.115, conf.int (-0.32, 0.03)
+
+
+
+
+#  Disgust
+
+
+
+```{r}
+
+#Trying ANCOVA, for Disgust
+fefa_disgust_lm <- lm(Disgust ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_disgust_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_disgust_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_disgust_rob <- robust::lmRob(formula = Disgust ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_disgust_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_disgust_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_disgust_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+
+
+```
+
+Estimate -0.480726 (on average, patients have about half a point lower values on Disgust)
+p-value < 0.001, conf.int -1.16 to -0.42
+
+
+
+#  Anger
+
+
+```{r}
+
+#Trying ANCOVA, for Anger
+fefa_anger_lm <- lm(Anger ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_anger_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_anger_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_anger_rob <- robust::lmRob(formula = Anger ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_anger_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_anger_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_anger_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+
+```
+
+
+Estimate -0.66210 (on average, patients have about half a point lower values on Anger)
+p-value < 0.001, conf.int -1.13 to -0.39
+
+#  Neutral
+
+```{r}
+
+#Trying ANCOVA, for Neutral
+fefa_neutral_lm <- lm(Neutral ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_neutral_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_neutral_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_neutral_rob <- robust::lmRob(formula = Neutral ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_neutral_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_neutral_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_neutral_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+
+```
+
+Estimate -0.22 (bootstrap, robust could not compute) (on average, patients have slightly lower values on Neutral)
+p-value 0.009, conf.int -0.40 to -0.09
+
+#  Fear
+
+```{r}
+
+#Trying ANCOVA, for Fear
+fefa_fear_lm <- lm(Fear ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_fear_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_fear_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_fear_rob <- robust::lmRob(formula = Fear ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_fear_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_fear_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_fear_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+
+```
+
+Estimate -0.360455 (on average, patients have slightly lower values on Fear)
+p-value 0.044, conf.int -0.65 to -0.01
+
+
+#  Sadness
+
+```{r}
+
+#Trying ANCOVA, for Sadness
+fefa_sadness_lm <- lm(Sadness ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_sadness_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_sadness_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_sadness_rob <- robust::lmRob(formula = Sadness ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_sadness_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_sadness_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_sadness_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+
+```
+
+Estimate -0.13232  (on average, patients have slightly lower values on Sadness)
+p-value 0.267, conf.int -0.61 to 0.22
+
+##  Mixed
+
+
+
+```{r}
+
+
+
+#Trying ANCOVA, for Mixed
+fefa_mixed_lm <- lm(Mixed ~ Pat_HC + Age + Gender, data = fefa)
+car::Anova(fefa_mixed_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_mixed_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_mixed_rob <- robust::lmRob(formula = Mixed ~ Pat_HC + Age + Gender, data = fefa)
+summary(fefa_mixed_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_mixed_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_mixed_lm, levels = "Pat_HC", fixed = "Age", "Gender", ci = 0.95)
+
+
+```
+
+
+The original ANCOVA model show that the effect of Pat_HC group is significant on FEFA Mixed scores, 
+p = 0.00003866
+In that model, neither the effect of gender or age is significant.
+
+The robust model gives us the estimates. The estimate for Patient indicates that, when keeping age and gender constant, belonging to the patient group still means a that your score will be 0.92 points lower on average, than for someone from the control group. Multiple R-squared is 0.0954, meaning our model explains 9,5 % of the variability in the data.  
+
+The bootstrap model gives us confidence intervals and significance tests without assuming normality and being robust to violations of homoscedasticty. According to the bootstrap model the effect of group is significant at the level of p < .001, with a 95% confidence interval between -1.61 and -0.68 for the difference between groups. Neither the effect of gender or age is significant. 
+
+Adjusted means.
+
+
+#  Exploratory analysis of drug-naive patients, compared to HC and medicated FEP
+
+
+```{r}
+
+#Change factor level, so that drug-naive is the comparison group. 
+fefa$Medication <- fct_relevel(fefa$Medication, c("Drug_naive", "Medicated", "Control"))
+
+#Trying ANCOVA, with three levels: Drug-naive, medicated and HC. For FEFA Total
+fefa_dn_total_lm <- lm(Total ~ Medication + Age + Gender, data = fefa)
+car::Anova(fefa_dn_total_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_dn_total_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_dn_total_rob <- robust::lmRob(formula = Total ~ Medication + Age + Gender, data = fefa)
+summary(fefa_dn_total_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_dn_total_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_dn_total_lm, levels = "Medication", fixed = "Age", "Gender", ci = 0.95)
+# Calculating contrasts between all three groups
+modelbased::estimate_contrasts(fefa_dn_total_lm, standardize = TRUE, adjust = "none")
+
+#As Gender was not super important, we will try without Gender
+fefa_dn_total_lm2 <- lm(Total ~ Medication + Age, data = fefa)
+modelbased::estimate_contrasts(fefa_dn_total_lm2, standardize = TRUE, adjust = "none")
+
+modelbased::estimate_means(fefa_dn_total_lm2, levels = "Medication", fixed = "Age", ci = 0.95)
+
+
+```
+
+(Intercept) just shows the mean value for the comparison group (in this case the drug naive group)
+
+The original ANCOVA shows that there is a significant effect of group, which is to be expected. 
+
+In the robust ANCOVA, the parameter estimates named MedicationMedication compares the Drug-naive patients to the Medicated patients. The parameter estimate called MedicationControl compares Drug-naive patients to the control group. 
+In the robust ANCOVA, we get the parameter estimates for the difference between drug-naive patients and the other two groups. On average, they perform 1.7 points better than the medicated patients, and 1.4 points worse than the healthy controls.
+The bootstrap model gives us the p-values and confidence intervals. 
+Drug naive: p = 0.028 (-3.47, -0.21)
+Medicated: p = 0.010 (0.53, 3.05)
+
+(First time around I used the healthy control group as comparison)
+
+(Intercept) just shows the mean value for the comparison group (in this case the healthy control group)
+
+The original ANCOVA shows that there is a significant effect of group, which is to be expected. 
+
+In the robust ANCOVA, the parameter estimates named MedicationDrug_naive compares the control group to the Drug-naive patients. The parameter estimate called MedicationMedicated compares the control group to the Medicated patients. 
+In the robust ANCOVA, the drug-naive patients perform significantly worse than the controls, p-value 0.0299, approximately 1,5 points lower. 
+Medicated patients score approximately 3 points lower than healthy controls. 
+The bootstrap model gives us the p-values and confidence intervals. 
+Drug naive: p = 0.012 (-3.15, -0.40)
+Medicated: p = < 0.001 (-5.25, -2.30)
+
+
+
+```{r}
+
+#Trying ANCOVA, with three levels: Drug-naive, medicated and HC. For FEFA Negative
+fefa_dn_neg_lm <- lm(Negative ~ Medication + Age + Gender, data = fefa)
+car::Anova(fefa_dn_neg_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_dn_neg_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_dn_neg_rob <- robust::lmRob(formula = Negative ~ Medication + Age + Gender, data = fefa)
+summary(fefa_dn_neg_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_dn_neg_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_dn_neg_lm, levels = "Medication", fixed = "Age", "Gender", ci = 0.95)
+
+
+
+```
+
+The original ANCOVA shows that there is a significant effect of group, which is to be expected. 
+
+In the robust ANCOVA, the parameter estimates named MedicationMedicaition compares the Drug-naive patients to the Medicated patients. The parameter estimate called MedicationControl compares Drug-naive patients to the control group. 
+In the robust ANCOVA, we get the parameter estimates for the difference between drug-naive patients and the other two groups. 
+On average, they perform 0.7 points better than the medicated patients, and 1.4 points worse than the healthy controls.
+The bootstrap model gives us the p-values and confidence intervals. 
+Drug naive: p = 0.032 (-2.79, -0.22)
+Medicated: p = 0.012 (0.40, 2.45)
+
+
+```{r}
+
+#Trying ANCOVA, with three levels: Drug-naive, medicated and HC. For FEFA Joy
+fefa_dn_joy_lm <- lm(Joy ~ Medication + Age + Gender, data = fefa)
+car::Anova(fefa_dn_joy_lm, type = 3)
+
+#Plot diagnostics for model
+plot(fefa_dn_joy_lm, which = c(1, 3, 2, 4))
+
+#Fitting a robust model 
+fefa_dn_joy_rob <- robust::lmRob(formula = Joy ~ Medication + Age + Gender, data = fefa)
+summary(fefa_dn_joy_rob)
+
+#Using bootstrapping, to compute robust confidence intervals and significance tests. 
+parameters::bootstrap_parameters(fefa_dn_joy_lm)
+
+#Now, comparing the means of the groups (adjusted for age and gender): 
+
+modelbased::estimate_means(fefa_dn_joy_lm, levels = "Medication", fixed = "Age", "Gender", ci = 0.95)
+
+
+
+
+
+```
+
+The original ANCOVA shows that there is a significant effect of group, which is to be expected. 
+
+In the robust ANCOVA, the parameter estimates named MedicationMedication compares the Drug-naive patients to the Medicated patients. The parameter estimate called MedicationControl compares Drug-naive patients to the control group. 
+In the robust ANCOVA, we get the parameter estimates for the difference between drug-naive patients and the other two groups. 
+On average, they perform 0.5 points better than the medicated patients, and almost exactly the same as healthy controls.
+The bootstrap model gives us the p-values and confidence intervals. 
+Drug naive: p = 0.014 (-0.99, -0.11)
+Medicated: p = 0.641 (-0.45, 0.28)
+
+Notice that there are a couple of very influential data points though! 
+
+##  Now, plotting this relationship
+
+```{r}
+
+drugplot_1 <- ggplot2::ggplot(fefa, aes(x = Medication, y = Total, fill = Medication), show.legend = FALSE) + 
+  geom_dotplot(binaxis = "y", binwidth = 0.6, stackdir = "center", show.legend = FALSE) +
+  geom_violin(show.legend = FALSE, alpha = 0.2) +
+  stat_summary(fun.data = "mean_cl_normal", show.legend = FALSE) + 
+  labs(x = "", y = "FEFA Total") +
+  coord_cartesian(ylim = c(0, 35)) +
+  scale_y_continuous(breaks = seq(0, 35, 5)) +
+  theme_minimal()
+
+drugplot_2 <- ggplot2::ggplot(fefa, aes(x = Medication, y = Negative, fill = Medication), show.legend = FALSE) + 
+  geom_dotplot(binaxis = "y", binwidth = 0.3, stackdir = "center", show.legend = FALSE) +
+  geom_violin(show.legend = FALSE, alpha = 0.2) +
+  stat_summary(fun.data = "mean_cl_normal", show.legend = FALSE) + 
+  labs(x = "", y = "FEFA Negative") +
+  coord_cartesian(ylim = c(0, 20)) +
+  scale_y_continuous(breaks = seq(0, 20, 2)) +
+  theme_minimal()
+
+drugplot_3 <- ggplot2::ggplot(fefa, aes(x = Medication, y = Joy, fill = Medication), show.legend = FALSE) + 
+  geom_dotplot(binaxis = "y", binwidth = 0.07, stackdir = "center", show.legend = FALSE) +
+  geom_violin(show.legend = FALSE, alpha = 0.2) +
+  stat_summary(fun.data = "mean_cl_boot", show.legend = FALSE) + 
+  labs(x = "", y = "FEFA Joy") +
+  coord_cartesian(ylim = c(0, 8)) +
+  scale_y_continuous(breaks = seq(0, 8, 2)) +
+  theme_minimal()
+
+drug_boxrow <- plot_grid(
+  drugplot_1 + theme(legend.position="none"),
+  drugplot_2 + theme(legend.position="none"),
+  drugplot_3 + theme(legend.position="none"),
+  align = 'vh',
+  labels = c("A", "B", "C"),
+  hjust = -1,
+  nrow = 1
+)
+  
+  
+
+#ggplot2::ggplot(fefa, aes(x = Pat_HC, y = Total, fill = Medication)) +
+#  geom_dotplot(binaxis = "y", binwidth = 0.7, stackdir = "center", alpha = 0.5)
+
+#ggplot2::ggplot(fefa, aes(x = Pat_HC, y = Total, fill = Medication)) +
+#  geom_dotplot(binaxis = "y", binwidth = 0.7, stackdir = "center", alpha = 0.5, position = "jitter")
+
+#ggplot2::ggplot(fefa, aes(x = Pat_HC, y = Negative, fill = Medication)) +
+#  geom_dotplot(binaxis = "y", binwidth = 0.7, stackdir = "center", alpha = 0.5, position = "jitter")
+
+#ggplot2::ggplot(fefa, aes(x = Pat_HC, y = Joy, fill = Medication)) +
+#  geom_dotplot(binaxis = "y", binwidth = 0.17, stackdir = "center", alpha = 0.5, position = "jitter")
+
+
+```
+
+
+
+#  Exploratory correlations - Mixed category and subscores of the PANSS
+
+```{r}
+
+#Starting with mixed category 
+pcor.test(fefa_fep$Mixed,fefa_fep$PANSS_Neg, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Mixed,fefa_fep$PANSS_Pos, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Mixed,fefa_fep$PANSS_Delusions, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Mixed,fefa_fep$PANSS_Hallucinations, fefa_fep[,c("Age")], method = c("kendall"))
+
+
+```
+
+
+```{r}
+
+pcor.test(fefa_fep$Total,fefa_fep$PANSS_Delusions, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Negative,fefa_fep$PANSS_Delusions, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Total,fefa_fep$PANSS_Hallucinations, fefa_fep[,c("Age")], method = c("kendall"))
+
+pcor.test(fefa_fep$Negative,fefa_fep$PANSS_Hallucinations, fefa_fep[,c("Age")], method = c("kendall"))
+
+
+```
+
+
+
+
+
+```{r}
+
+#Plot delusions and mixed
+
+#To actually get the results I want, I think I have to use the age-residuals or center my variables? 
+
+plot(fefa_fep$Mixed, fefa_fep$PANSS_Delusions)
+
+scatter1 <- ggplot2::ggplot(fefa_fep, aes(Mixed, PANSS_Delusions)) +
+  geom_point() 
+  
+
+scatter1 + stat_quantile(quantiles =0.5)
+scatter1 + geom_smooth(method = "lm")
+
+
+```
+
+##  Robustness check, other types of correlation
+
+```{r}
+
+pcor.test(fefa_fep$Mixed,fefa_fep$PANSS_Delusions, fefa_fep[,c("Age")], method = c("spearman"))
+pcor.test(fefa_fep$Mixed,fefa_fep$PANSS_Delusions, fefa_fep[,c("Age")], method = c("pearson"))
+
+```
+
+
+
+
+##  Demographic comparison of groups. 
+
+
+```{r}
+
+fefa$Pat_HC <- as.character(fefa$Pat_HC)
+fefa_fep$DUP <- as.numeric(fefa_fep$DUP)
+fefa_fep$GAF <- as.numeric(fefa_fep$GAF)
+fefa_fep$Patients.EDUYear <- as.numeric(fefa_fep$Patients.EDUYear)
+fefa_hc$Patients.EDUYear <- as.numeric(fefa_hc$Patients.EDUYear)
+
+#demo_summary <- fefa %>%
+#  dplyr::group_by(Pat_HC) %>%
+#  dplyr::summarise(across(10:17, mean, na.rm = TRUE), n = n()) %>%
+#    round(., 2)
+
+DUP_summary <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(DUP, na.rm = TRUE),
+    std_dev = sd(DUP, na.rm = TRUE),
+    median = median(DUP, na.rm = TRUE),
+    interquartile_range = IQR(DUP, na.rm = TRUE),
+    n_total = length(DUP),
+    n_NA = sum(is.na(DUP)),
+    n = length(DUP)-sum(is.na(DUP))
+  ) %>%
+  round(., 2)
+
+GAF_summary <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(GAF, na.rm = TRUE),
+    std_dev = sd(GAF, na.rm = TRUE),
+    n_total = length(GAF),
+    n_NA = sum(is.na(GAF)),
+    n = length(GAF)-sum(is.na(GAF))
+  ) %>%
+  round(., 2)
+
+CGI_summary <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(CGI, na.rm = TRUE),
+    std_dev = sd(CGI, na.rm = TRUE),
+    n_total = length(CGI),
+    n_NA = sum(is.na(CGI)),
+    n = length(CGI)-sum(is.na(CGI))
+  ) %>%
+  round(., 2)
+
+fefa_fep$PANSS_
+
+PANSS_Pos_summary <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(PANSS_Pos, na.rm = TRUE),
+    std_dev = sd(PANSS_Pos, na.rm = TRUE),
+    n_total = length(PANSS_Pos),
+    n_NA = sum(is.na(PANSS_Pos)),
+    n = length(PANSS_Pos)-sum(is.na(PANSS_Pos))
+  ) %>%
+  round(., 2)
+
+PANSS_Neg_summary <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(PANSS_Neg, na.rm = TRUE),
+    std_dev = sd(PANSS_Neg, na.rm = TRUE),
+    n_total = length(PANSS_Neg),
+    n_NA = sum(is.na(PANSS_Neg)),
+    n = length(PANSS_Neg)-sum(is.na(PANSS_Neg))
+  ) %>%
+  round(., 2)
+
+PANSS_Gen_summary <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(PANSS_Gen, na.rm = TRUE),
+    std_dev = sd(PANSS_Gen, na.rm = TRUE),
+    n_total = length(PANSS_Gen),
+    n_NA = sum(is.na(PANSS_Gen)),
+    n = length(PANSS_Gen)-sum(is.na(PANSS_Gen))
+  ) %>%
+  round(., 2)
+
+PANSS_Total_summary <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(PANSS_Total, na.rm = TRUE),
+    std_dev = sd(PANSS_Total, na.rm = TRUE),
+    n_total = length(PANSS_Total),
+    n_NA = sum(is.na(PANSS_Total)),
+    n = length(PANSS_Total)-sum(is.na(PANSS_Total))
+  ) %>%
+  round(., 2)
+
+Age_summary <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(Age, na.rm = TRUE),
+    std_dev = sd(Age, na.rm = TRUE),
+    n = length(Age)-sum(is.na(Age))
+  ) %>%
+  round(., 2)
+
+table(fefa_fep$Gender)
+
+table(fefa_hc$Gender)
+
+Age_summaryHC <- fefa_hc %>%
+  dplyr::summarise(
+    mean = mean(Age, na.rm = TRUE),
+    std_dev = sd(Age, na.rm = TRUE),
+    n = length(Age)-sum(is.na(Age))
+  ) %>%
+  round(., 2)
+
+table(fefa$Diagnosis)
+
+#Testing differences between groups
+t.test(Age ~ Pat_HC, data = fefa)
+t.test(fefa_fep$Age, fefa_hc$Age)
+
+#Is gender equally distributed between groups? 
+CrossTable(fefa$Pat_HC, fefa$Gender, expected = TRUE)
+
+#chisq.test(fefa_fep$Gender, fefa_hc$Gender)
+
+Edu_summaryFEP <- fefa_fep %>%
+  dplyr::summarise(
+    mean = mean(Patients.EDUYear, na.rm = TRUE),
+    std_dev = sd(Patients.EDUYear, na.rm = TRUE),
+    n = length(Patients.EDUYear)-sum(is.na(Patients.EDUYear))
+  ) %>%
+  round(., 2)
+
+Edu_summaryHC <- fefa_hc %>%
+  dplyr::summarise(
+    mean = mean(Patients.EDUYear, na.rm = TRUE),
+    std_dev = sd(Patients.EDUYear, na.rm = TRUE),
+    n = length(Patients.EDUYear)-sum(is.na(Patients.EDUYear))
+  ) %>%
+  round(., 2)
+
+#Testing differences between groups
+t.test(fefa_fep$Patients.EDUYear, fefa_hc$Patients.EDUYear)
+
+```
+
+
+
+#  Calculating effect size
+
+```{r}
+
+#Make a regression model and extract the residuals, to be able to correctly calculate Cohen's D
+#FEFA Total
+model_Total <- lm(formula = Total ~ Age + Gender, fefa) #Regression model
+Total_residuals <- model_Total$residuals #Extracting residuals
+fefa$Total_residuals <- Total_residuals #adding residuals to data.frame
+#FEFA Negative
+model_Negative <- lm(formula = Negative ~ Age + Gender, fefa) #Regression model
+Negative_residuals <- model_Negative$residuals #Extracting residuals
+fefa$Negative_residuals <- Negative_residuals #adding residuals to data.frame
+#FEFA Joy
+model_Joy <- lm(formula = Joy ~ Age + Gender, fefa) #Regression model
+Joy_residuals <- model_Joy$residuals #Extracting residuals
+fefa$Joy_residuals <- Joy_residuals #adding residuals to data.frame
+#FEFA Surprise
+model_Surprise <- lm(formula = Surprise ~ Age + Gender, fefa) #Regression model
+Surprise_residuals <- model_Surprise$residuals #Extracting residuals
+fefa$Surprise_residuals <- Surprise_residuals #adding residuals to data.frame
+#FEFA Disgust
+model_Disgust <- lm(formula = Disgust ~ Age + Gender, fefa) #Regression model
+Disgust_residuals <- model_Disgust$residuals #Extracting residuals
+fefa$Disgust_residuals <- Disgust_residuals #adding residuals to data.frame
+#FEFA Anger
+model_Anger <- lm(formula = Anger ~ Age + Gender, fefa) #Regression model
+Anger_residuals <- model_Anger$residuals #Extracting residuals
+fefa$Anger_residuals <- Anger_residuals #adding residuals to data.frame
+#FEFA Fear
+model_Fear <- lm(formula = Fear ~ Age + Gender, fefa) #Regression model
+Fear_residuals <- model_Fear$residuals #Extracting residuals
+fefa$Fear_residuals <- Fear_residuals #adding residuals to data.frame
+#FEFA Sadness
+model_Sadness <- lm(formula = Sadness ~ Age + Gender, fefa) #Regression model
+Sadness_residuals <- model_Sadness$residuals #Extracting residuals
+fefa$Sadness_residuals <- Sadness_residuals #adding residuals to data.frame
+#FEFA Mixed
+model_Mixed <- lm(formula = Mixed ~ Age + Gender, fefa) #Regression model
+Mixed_residuals <- model_Mixed$residuals #Extracting residuals
+fefa$Mixed_residuals <- Mixed_residuals #adding residuals to data.frame
+
+effectsize::cohens_d(Total_residuals ~ Pat_HC, data = fefa)
+effectsize::cohens_d(Negative_residuals ~ Pat_HC, data = fefa)
+effectsize::cohens_d(Joy_residuals ~ Pat_HC, data = fefa)
+effectsize::cohens_d(Surprise_residuals ~ Pat_HC, data = fefa)
+effectsize::cohens_d(Disgust_residuals ~ Pat_HC, data = fefa)
+effectsize::cohens_d(Anger_residuals ~ Pat_HC, data = fefa)
+effectsize::cohens_d(Fear_residuals ~ Pat_HC, data = fefa)
+effectsize::cohens_d(Sadness_residuals ~ Pat_HC, data = fefa)
+effectsize::cohens_d(Mixed_residuals ~ Pat_HC, data = fefa)
+
+#Effect size for drug naive analysis, Total: 
+car::Anova(fefa_dn_total_lm, type = 3) %>% 
+  effectsize::eta_squared(., ci = 0.95)
+#This is for the whole model though.. 
+modelbased::estimate_contrasts(fefa_dn_total_lm, adjust = "none", ci = 0.95, levels = "Medication", fixed = "Age", "Gender")
+
+
+```
