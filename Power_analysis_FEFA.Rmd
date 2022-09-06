@@ -1,0 +1,137 @@
+---
+title: "Power_analysis_FEFA"
+author: "Maria Lee"
+date: "9/6/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pwr)
+library(ggplot2)
+
+```
+
+Power analysis in order to figure out how many statistical tests we can do in the FEFA KASP study (given that data has already been collected). 
+In the first part, we want to compare performance on FEFA between two groups - the patients and the controls with regards to different emotions. 
+In the second part we wish to correlate performance on FEFA to symptom levels. Is there a correlation between level of psychotic symptoms and inability to identify emotions?  
+
+We have 69 patients with FEFA data and 52 control subjects (these numbers were used as the power calculation was performed before scrutinizing subjects in great detail. 2 patients and 1 control were later excluded due to drug use and being a statistical outlier)
+
+# Part 1, group comparison 
+
+What effect size do we expect in the group comparison? 
+-0.27 to -1.35 for the whole test (general emotion detection), based on previous literature (for example Miklovic, 2020)
+
+
+```{r}
+n1 <- 69 #patients (this is the n to be used for correlation calculations as well)
+n2 <- 52 #controls
+alpha_level <- seq(from = 0.0001, to = 0.05,by = 0.0005)
+
+#declare empty vectors as placeholders
+powercurve_2 <- c() 
+powercurve_5_ <- c()
+powercurve_8 <- c()
+
+#for loop to create all powercurves#
+for (s in 1:length(alpha_level)) {
+  output_2 <- pwr.t2n.test(n = n1, n2 = n2, d = 0.2, sig.level = alpha_level[s], alternative = "greater") 
+  powercurve_2[s] <- output_2$power #use dollar sign to fetch only power "value", and assign it to "powercurve_2"-vector
+  
+  output_5_ <- pwr.t2n.test(n = n1, n2 = n2, d = 0.5, sig.level = alpha_level[s], alternative = "greater")
+  powercurve_5_[s] <- output_5_$power
+  
+  output_8 <- pwr.t2n.test(n = n1, n2 = n2, d = 0.8, sig.level = alpha_level[s], alternative = "greater")
+  powercurve_8[s] <- output_8$power
+}
+
+#Before plotting data or analysing data in R, ALWAYS create a dataframe
+
+power_frame2 <- data.frame(alpha_level, powercurve_2, powercurve_5_, powercurve_8)
+power_frame2$alpha_level
+
+#Plot
+plot(power_frame2$alpha_level, power_frame2$powercurve_2, ylim = c(0.00, 1.00), 
+     ylab = "Power level", xlim = c(0.0001, 0.05), xlab = "Alpha level", 
+     type = "o", col = "red", main = "Powercurves for d = 0.2 (red), 0.5 (black), 0.8 (green)")
+
+par(new=TRUE)
+
+plot(power_frame2$alpha_level, power_frame2$powercurve_5_, ylim = c(0.00, 1.00), 
+     ylab = "", xlim = c(0.0001, 0.05), xlab = "", 
+     type = "o", col = "black", main = "Powercurves for d = 0.2 (red), 0.5 (black), 0.8 (green)")
+
+par(new=TRUE)
+
+plot(power_frame2$alpha_level, power_frame2$powercurve_8, ylim = c(0.00, 1.00), 
+     ylab = "", xlim = c(0.0001, 0.05), xlab = "", 
+     type = "o", col = "green", main = "Powercurves for d = 0.2 (red), 0.5 (black), 0.8 (green)")
+
+
+```
+
+
+The graph displays curves for power levels depending on the effect size (in this case a Cohen's D of 0.2, 0.5 and 0.8) given our sample size. The x-axis displays the alpha-level which would be 0.05 for one comparison, but will need to be adjusted for multiple comparison. Our power to detect a difference between groups decreases with the number of statistical tests performed. 
+
+Our aim was to be able to detect a group difference of a medium to large effect size approx. Cohen’s d = 0.7). Given these power curves our estimation is that we are able to perform 5 group comparisons, will retaining about 80 % power. 
+
+
+# Part 2, correlation between symptoms and FEFA scores - only for patients
+
+What effect size is reasonable to expect when correlating psychotic symptoms to FAR ability? 
+In the literature, r-values ranged between -0.269 and -0.453 (Lescynzka, 2015 and Mitrovic, 2020)
+
+
+```{r}
+
+#declare empty vectors as placeholders
+powercurve_3 <- c() 
+powercurve_5 <- c()
+powercurve_7 <- c()
+
+#for loop to create all powercurves#
+for (s in 1:length(alpha_level)) {
+  output_3 <- pwr.r.test(n = n1, r = 0.4, sig.level = alpha_level[s]) 
+  powercurve_3[s] <- output_3$power #use dollar sign to fetch only power "value", and assign it to "powercurve_3"-vector
+  
+  output_5 <- pwr.r.test(n = n1, r = 0.5, sig.level = alpha_level[s])
+  powercurve_5[s] <- output_5$power
+  
+  output_7 <- pwr.r.test(n = n1, r = 0.7, sig.level = alpha_level[s])
+  powercurve_7[s] <- output_7$power
+}
+
+#Before plotting data or analysing data in R, ALWAYS create a dataframe
+
+power_frame <- data.frame(alpha_level, powercurve_3, powercurve_5, powercurve_7)
+power_frame$alpha_level
+
+
+#Plot
+plot(power_frame$alpha_level, power_frame$powercurve_3, ylim = c(0.00, 1.00), 
+     ylab = "Power level", xlim = c(0.0001, 0.05), xlab = "Alpha level", 
+     type = "o", col = "red", main = "Powercurves for r = 0.3 (red), 0.5 (black), 0.7 (green)")
+
+par(new=TRUE)
+
+plot(power_frame$alpha_level, power_frame$powercurve_5, ylim = c(0.00, 1.00), 
+     ylab = "", xlim = c(0.0001, 0.05), xlab = "", 
+     type = "o", col = "black", main = "Powercurves for r = 0.3 (red), 0.5 (black), 0.7 (green)")
+
+par(new=TRUE)
+
+plot(power_frame$alpha_level, power_frame$powercurve_7, ylim = c(0.00, 1.00), 
+     ylab = "", xlim = c(0.0001, 0.05), xlab = "", 
+     type = "o", col = "green", main = "Powercurves for r = 0.3 (red), 0.5 (black), 0.7 (green)")
+
+
+
+```
+
+The graph displays curves for power levels depending on the effect size (in this case a Pearson's r of 0.3, 0.5 and 0.7) given our sample size (only the patient group). The x-axis displays the alpha-level which would be 0.05 for one comparison, but will need to be adjusted for multiple comparison. Our power to detect a significant correlation decreases with the number of statistical tests performed. 
+
+
+Our aim in the second part of the study was to be able to detect a correlation of moderate magnitude (considered to be an r = 0.5) between psychotic symptom levels and FEFA test resuls. Given the power curves above we estimated that we were able to perform 6 correlations while still remaining 80% power. 
+
+
